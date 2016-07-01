@@ -42,7 +42,7 @@ class Host:
             stdin, stdout, stderr = ssh.exec_command("echo '[%s@%s] %s'" % (self.username, self.address, cmd))
             print stdout.readlines()[0]
             stdin, stdout, stderr = ssh.exec_command("nohup %s &> %s &" % (cmd, log))
-            ssh.close()
+        ssh.close()
 
     def run_iperf_server(self):
         cmd = "iperf -s -u -i 1 -p 5002"
