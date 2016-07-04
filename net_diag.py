@@ -1,10 +1,16 @@
 #!/usr/bin/python
 
 import multiprocessing
+import datetime
 import paramiko
 import time
 import uuid
 import os
+import string
+
+test_duration = 10
+test_bandwidth = '1M'
+mtr_count = 100
 
 class Host:
     def __init__(self, name, address, port=22, username='root', password='', keyfile=None):
@@ -27,38 +33,103 @@ class Host:
             return None
         return ssh
 
-    def run_command(self, cmd):
+    def exec_command(self, cmd):
+        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ssh = self.connect()
         if ssh:
-            stdin, stdout, stderr = ssh.exec_command("echo \"[%s@%s] %s\"" % (self.username, self.address, cmd))
-            print stdout.readlines()[0]
+            stdin, stdout, stderr = ssh.exec_command("echo \"%s [%s@%s] %s\"" % (cur_time, self.username, self.address, cmd))
+            print stdout.readlines()[0].strip()
             stdin, stdout, stderr = ssh.exec_command(cmd)
-            ssh.close()
-        return stdout.readlines()
+            out = stdout.readlines()
+        ssh.close()
+        return out
 
-    def run_command_background(self, cmd, log):
+    def make_scripts(self, cmds):
+        print cmds
+        cmds.append("rm -- \"$0\"")
+        br = '\n'
+        cmd = br.join(cmds)
+        fi = open("./run.sh", "w")
+        fi.write(cmd)
+        fi.close()
+        self.put_file("./run.sh", "/tmp/run.sh")
+        os.system("rm -rf ./run.sh")
+
+    def exec_commands(self, cmds):
+        self.make_scripts(cmds)
+        return self.exec_command("/bin/bash /tmp/run.sh")
+
+    def exec_command_bg(self, cmd, log):
+        cmds = ["nohup %s &> /tmp/%s &" % (cmd, log), "echo $!"]
+        pid = string.atoi(self.exec_commands(cmds)[0], 10)
+        print "pid: %s" % pid
+        return pid
+
+    def exec_commands_bg(self, cmds, log):
+        self.make_scripts(cmds)
+        self.exec_command_bg("/bin/bash /tmp/run.sh", log)
+
+    def kill_pid(self, pid):
+        self.exec_command("kill -2 %d" % pid)
+
+    def get_file(self, remotepath, localdir="."):
+        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        filename = os.path.basename(remotepath)
+        localpath = "%s/%s_%s" % (localdir, self.address, filename)
         ssh = self.connect()
         if ssh:
-            stdin, stdout, stderr = ssh.exec_command("echo '[%s@%s] %s'" % (self.username, self.address, cmd))
-            print stdout.readlines()[0]
-            stdin, stdout, stderr = ssh.exec_command("nohup %s &> %s &" % (cmd, log))
+            sftp = ssh.open_sftp()
+            sftp.get(remotepath, localpath)
+            sftp.close()
+            os.system("echo \"%s [%s@%s]\" get %s from %s" % (cur_time, self.username, self.address, localpath, remotepath))
         ssh.close()
 
-    def run_iperf_server(self):
-        cmd = "iperf -s -u -i 1 -p 5002"
-        log = "/tmp/iperf_%s.log" % uuid.uuid1()
-        self.run_command_background(cmd, log)
-        return log
+    def put_file(self, localpath, remotepath):
+        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ssh = self.connect()
+        if ssh:
+            sftp = ssh.open_sftp()
+            sftp.put(localpath, remotepath)
+            sftp.close()
+            os.system("echo \"%s [%s@%s]\" put %s to %s" % (cur_time, self.username, self.address, localpath, remotepath))
+        ssh.close()
 
-    def run_iperf_client(self, remote):
-        cmd = "iperf -c %s -u -b 1M -t 300 -i 1 -p 5002" % remote.address
-        log = "/tmp/iperf_%s.log" % uuid.uuid1()
-        self.run_command_background(cmd, log)
-        return log
+    def wait_pid(self, pid):
+        while 1:
+            out = self.exec_command("ps -q %d" % pid)
+            if len(out) == 2:
+                time.sleep(10)
+            else:
+                return
 
-    def kill_iperf(self):
-        cmd = "killall -2 iperf"
-        self.run_command(cmd)
+class DiagHost(Host):
+    def __init__(self, name, address, port=22, username='root', password='', keyfile=None, test_address=None, iperf_port=5001):
+        Host.__init__(self, name, address, port, username, password, keyfile)
+        if test_address == None:
+            self.test_address = address
+        else:
+            self.test_address = test_address
+        self.iperf_port = iperf_port
+
+    def run_iperf_server(self, log):
+        cmd = "iperf -s -u -i 1 -p %d" % self.iperf_port
+        return self.exec_command_bg(cmd, log)
+
+    def run_iperf_client(self, remote, log):
+        cmd = "iperf -c %s -u -b %s -t %d -i 1 -p %d" % (remote.address, test_bandwidth, test_duration, remote.iperf_port)
+        return self.exec_command_bg(cmd, log)
+
+    def run_ping(self, remote, log):
+        cmd = "ping -A %s" % remote.address
+        return self.exec_command_bg(cmd, log)
+
+    def run_mtr(self, remote, log):
+        cmd = "mtr -r -n -c %d -i 0.2 %s" % (mtr_count, remote.address)
+        return self.exec_command_bg(cmd, log)
+
+    def run_sar(self, log):
+        cmd = "sar -n DEV 1"
+        return self.exec_command_bg(cmd, log)
 
     def run_traceroute(self, remote):
         hops = []
@@ -79,70 +150,80 @@ class Host:
             ssh.close()
         return hops
 
-    def run_ping(self, remote):
-        cmd = "ping -A %s" % remote.address
-        log = "/tmp/ping_%s_%s.log" % (hop, uuid.uuid1())
-        self.run_command_background(cmd, log)
-        return log
+    def kill_iperf(self):
+        cmd = "killall -2 iperf"
+        self.exec_command(cmd)
+
+    def kill_sar(self):
+        cmd = "killall -2 sar"
+        self.exec_command(cmd)
 
     def kill_ping(self):
         cmd = "killall -2 ping"
-        self.run_command(cmd)
-
-    def get_file(self, path, filename):
-        localpath = './%s_%s' % (self.name, filename)
-        ssh = self.connect()
-        if ssh:
-            sftp = ssh.open_sftp()
-            sftp.get(path, localpath)
-            sftp.close()
-        ssh.close()
-
-    def put_file(self, localpath, remotepath):
-        ssh = self.connect()
-        if ssh:
-            sftp = ssh.open_sftp()
-            sftp.put(localpath, remotepath)
-            sftp.close()
-        ssh.close()
+        self.exec_command(cmd)
 
     def rm_file(self, path):
         cmd = "rm -rf %s" % path
-        self.run_command(cmd)
+        self.exec_command(cmd)
 
-    def run_mtr(self, remote):
-        cmd = "mtr -r -n -c 1000 -i 0.2 %s" % remote.address
-        log = "/tmp/mtr_%s.log" % uuid.uuid1()
-        self.run_command_background(cmd, log)
-        return log
+    def clear_procs(self):
+        cmds = ["killall -2 iperf", "killall -2 sar", "killall -2 ping", "rm -rf /tmp/*.log"]
+        self.exec_commands(cmds)
+
+    def clear_logs(self, tid):
+        self.exec_command("rm -rf /tmp/*%s.log" % tid)
+
+
+class Diagnostics:
+    def __init__(self, src, dst):
+        self.src = src
+        self.dst = dst
+        self.tid = uuid.uuid1()
+        self.src_logs = []
+        self.dst_logs = []
+
+    def run(self):
+        self.src.clear_procs()
+        self.dst.clear_procs()
+
+        iperf_server_log = "iperf_server_%s.log" % self.tid
+        self.dst.run_iperf_server(iperf_server_log)
+        self.dst_logs.append(iperf_server_log)
+        iperf_client_log = "iperf_client_%s.log" % self.tid
+        self.src.run_iperf_client(self.dst, iperf_client_log)
+        self.src_logs.append(iperf_client_log)
+
+        sar_log = "sar_%s.log" % self.tid
+        self.dst.run_sar(sar_log)
+        self.dst_logs.append(sar_log)
+        self.src.run_sar(sar_log)
+        self.src_logs.append(sar_log)
+
+        mtr_log = "mtr_%s.log" % self.tid
+        mtr_pid = self.src.run_mtr(self.dst, mtr_log)
+        self.src_logs.append(mtr_log)
+
+        time.sleep(test_duration+1)
+        self.src.wait_pid(mtr_pid)
+
+        self.dst.kill_iperf()
+        self.dst.kill_sar()
+        self.src.kill_sar()
+
+        for log in self.src_logs:
+            self.src.get_file("/tmp/%s" % log)
+        for log in self.dst_logs:
+            self.dst.get_file("/tmp/%s" % log)
+
+        self.src.clear_logs(self.tid)
+        self.dst.clear_logs(self.tid)
+
 
 if __name__ == '__main__':
-    rwanda = Host('rwanda', '10.0.63.202', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'])
-    ireland = Host('ireland', '10.0.63.203', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'])
-    singapore = Host('singapore', '10.0.63.204', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'])
+    rwanda = DiagHost('rwanda', '10.0.63.202', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.202', iperf_port=5001)
+    ireland = DiagHost('ireland', '10.0.63.203', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.203', iperf_port=5001)
+    singapore = DiagHost('singapore', '10.0.63.204', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.203', iperf_port=5001)
 
-    ireland.rm_file("/tmp/*.log")
-    singapore.rm_file("/tmp/*.log")
-    rwanda.rm_file("/tmp/*.log")
-    ireland.kill_iperf()
-    singapore.kill_iperf()
-    rwanda.kill_iperf()
-    ireland.kill_ping()
-    rwanda.kill_ping()
-    singapore.kill_ping()
+    diag = Diagnostics(rwanda, ireland)
+    diag.run()
 
-    iperf_server_log = ireland.run_iperf_server()
-    iperf_client_log = rwanda.run_iperf_client(ireland)
-    mtr_log = rwanda.run_mtr(ireland)
-    time.sleep(300)
-    ireland.kill_iperf()
-    ireland.get_file(iperf_server_log, "iperf_server.log")
-    rwanda.get_file(iperf_client_log, "iperf_client.log")
-    rwanda.get_file(mtr_log, "mtr.log")
-
-    iperf_server_log = rwanda.run_iperf_server()
-    iperf_client_log = singapore.run_iperf_client(rwanda)
-    time.sleep(300)
-    rwanda.kill_iperf()
-    rwanda.get_file(iperf_server_log, "iperf_server.log")
-    singapore.get_file(iperf_client_log, "iperf_client.log")
