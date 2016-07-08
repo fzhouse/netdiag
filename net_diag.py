@@ -4,19 +4,58 @@ import multiprocessing
 import datetime
 import paramiko
 import time
-import uuid
+import shortuuid
 import os
-import string
+import logging
+import xlwt
+import csv
 
 test_duration = 10
 test_bandwidth = '1M'
-mtr_count = 100
+mtr_int = 0.2
+mtr_count = int(test_duration/2/mtr_int)
+
+logger = logging.getLogger('netdiag')
+logger.setLevel(logging.INFO)
+hdr = logging.StreamHandler()
+formatter = logging.Formatter('[%(asctime)-15s] %(filename)s %(levelname)-8s %(message)s')
+hdr.setFormatter(formatter)
+logger.addHandler(hdr)
+#logging.basicConfig(level=logging.INFO, format=FORMAT, filename='diag.log', filemode='w')
+
+def csv2xlsx(xlsx, log):
+    data = os.path.basename(log).split('_')
+    sheetname = "%s_%s" % (data[0], data[1])
+    sheet = xlsx.add_sheet(sheetname)
+    csvfile = open(log, "rb")
+    reader = csv.reader(csvfile)
+    l = 0
+    for line in reader:
+        if line[0].startswith('#'):
+            continue
+        r = 0
+        for i in line:
+            sheet.write(l, r, i)
+            r += 1
+        l += 1
+    logger.info("save %s to %s" % (log, sheetname))
+    os.system("rm -rf %s" % log)
+
 
 class Host:
-    def __init__(self, name, address, port=22, username='root', password='', keyfile=None):
+    def __init__(self, name, address):
         self.name = name
         self.address = address
-        self.port = port
+
+
+class ManagedHost(Host):
+    def __init__(self, name, address, ssh_address=None, ssh_port=22, username='root', password=None, keyfile=None):
+        Host.__init__(self, name, address)
+        if ssh_address:
+            self.ssh_address = ssh_address
+        else:
+            self.ssh_address = address
+        self.ssh_port = ssh_port
         self.username = username
         self.password = password
         self.keyfile = keyfile
@@ -24,28 +63,32 @@ class Host:
     def connect(self):
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        if self.keyfile:
-            ssh.connect(self.address, port=self.port, username=self.username, key_filename=self.keyfile)
-        elif self.password:
-            ssh.connect(self.address, port=self.port, username=self.username, password=self.password)
-        else:
-            print 'Can not connect to host %s' % self.address
+        try:
+            if self.keyfile:
+                ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename=self.keyfile)
+            elif self.password:
+                ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, password=self.password)
+            else:
+                ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename='%s/.ssh/id_rsa' % os.environ['HOME'])
+            return ssh
+        except e:
+            logger.error(e)
             return None
-        return ssh
 
     def exec_command(self, cmd):
-        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ssh = self.connect()
-        if ssh:
-            stdin, stdout, stderr = ssh.exec_command("echo \"%s [%s@%s] %s\"" % (cur_time, self.username, self.address, cmd))
-            print stdout.readlines()[0].strip()
+        try:
+            ssh = self.connect()
+            logger.info('[%s@%s] %s' % (self.username, self.address, cmd))
             stdin, stdout, stderr = ssh.exec_command(cmd)
             out = stdout.readlines()
-        ssh.close()
-        return out
+            ssh.close()
+            return out
+        except e:
+            logger.error(e)
+            return None
 
     def make_scripts(self, cmds):
-        print cmds
+        logger.info(cmds)
         cmds.append("rm -- \"$0\"")
         br = '\n'
         cmd = br.join(cmds)
@@ -61,8 +104,8 @@ class Host:
 
     def exec_command_bg(self, cmd, log):
         cmds = ["nohup %s &> /tmp/%s &" % (cmd, log), "echo $!"]
-        pid = string.atoi(self.exec_commands(cmds)[0], 10)
-        print "pid: %s" % pid
+        pid = int(self.exec_commands(cmds)[0], 10)
+        logger.info("%s pid: %s" % (cmd, pid))
         return pid
 
     def exec_commands_bg(self, cmds, log):
@@ -73,7 +116,6 @@ class Host:
         self.exec_command("kill -2 %d" % pid)
 
     def get_file(self, remotepath, localdir="."):
-        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         filename = os.path.basename(remotepath)
         localpath = "%s/%s_%s" % (localdir, self.address, filename)
         ssh = self.connect()
@@ -81,17 +123,16 @@ class Host:
             sftp = ssh.open_sftp()
             sftp.get(remotepath, localpath)
             sftp.close()
-            os.system("echo \"%s [%s@%s]\" get %s from %s" % (cur_time, self.username, self.address, localpath, remotepath))
+            logger.info("[%s@%s] get %s from %s" % (self.username, self.address, localpath, remotepath))
         ssh.close()
 
     def put_file(self, localpath, remotepath):
-        cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ssh = self.connect()
         if ssh:
             sftp = ssh.open_sftp()
             sftp.put(localpath, remotepath)
             sftp.close()
-            os.system("echo \"%s [%s@%s]\" put %s to %s" % (cur_time, self.username, self.address, localpath, remotepath))
+            logger.info("[%s@%s] put %s to %s" % (self.username, self.address, localpath, remotepath))
         ssh.close()
 
     def wait_pid(self, pid):
@@ -102,21 +143,17 @@ class Host:
             else:
                 return
 
-class DiagHost(Host):
-    def __init__(self, name, address, port=22, username='root', password='', keyfile=None, test_address=None, iperf_port=5001):
-        Host.__init__(self, name, address, port, username, password, keyfile)
-        if test_address == None:
-            self.test_address = address
-        else:
-            self.test_address = test_address
+class DiagHost(ManagedHost):
+    def __init__(self, name, address, ssh_address, ssh_port=22, username='root', password='', keyfile=None, iperf_port=5001):
+        ManagedHost.__init__(self, name, address, ssh_address, ssh_port, username, password, keyfile)
         self.iperf_port = iperf_port
 
     def run_iperf_server(self, log):
-        cmd = "iperf -s -u -i 1 -p %d" % self.iperf_port
+        cmd = "iperf -s -u -i 1 -p %d -y C" % self.iperf_port
         return self.exec_command_bg(cmd, log)
 
     def run_iperf_client(self, remote, log):
-        cmd = "iperf -c %s -u -b %s -t %d -i 1 -p %d" % (remote.address, test_bandwidth, test_duration, remote.iperf_port)
+        cmd = "iperf -c %s -u -d -b %s -t %d -i 1 -p %d -y C" % (remote.address, test_bandwidth, test_duration, remote.iperf_port)
         return self.exec_command_bg(cmd, log)
 
     def run_ping(self, remote, log):
@@ -124,11 +161,11 @@ class DiagHost(Host):
         return self.exec_command_bg(cmd, log)
 
     def run_mtr(self, remote, log):
-        cmd = "mtr -r -n -c %d -i 0.2 %s" % (mtr_count, remote.address)
+        cmd = "mtr -r -n -C -c %d -i %.1f %s | sed 's/;/,/g'" % (mtr_count, mtr_int, remote.address)
         return self.exec_command_bg(cmd, log)
 
     def run_sar(self, log):
-        cmd = "sar -n DEV 1"
+        cmd = "/usr/lib64/sa/sadc 1 14400"
         return self.exec_command_bg(cmd, log)
 
     def run_traceroute(self, remote):
@@ -154,9 +191,9 @@ class DiagHost(Host):
         cmd = "killall -2 iperf"
         self.exec_command(cmd)
 
-    def kill_sar(self):
-        cmd = "killall -2 sar"
-        self.exec_command(cmd)
+    def kill_sar(self, log):
+        cmds = ["killall -2 sadc", "mv /tmp/%s /tmp/tmplog" % log, "sadf -d /tmp/tmplog -- -r -n DEV | grep -v '^#' | sed 's/;/,/g' > /tmp/%s" % log, "rm -rf /tmp/tmplog"]
+        self.exec_commands(cmds)
 
     def kill_ping(self):
         cmd = "killall -2 ping"
@@ -167,7 +204,7 @@ class DiagHost(Host):
         self.exec_command(cmd)
 
     def clear_procs(self):
-        cmds = ["killall -2 iperf", "killall -2 sar", "killall -2 ping", "rm -rf /tmp/*.log"]
+        cmds = ["killall -2 iperf", "killall -2 sadc", "killall -2 ping", "rm -rf /tmp/*.log"]
         self.exec_commands(cmds)
 
     def clear_logs(self, tid):
@@ -178,20 +215,33 @@ class Diagnostics:
     def __init__(self, src, dst):
         self.src = src
         self.dst = dst
-        self.tid = uuid.uuid1()
+        self.tid = shortuuid.uuid()
         self.src_logs = []
         self.dst_logs = []
 
     def run(self):
+        if str(self.dst.__class__) == '__main__.Host':
+            self.src.clear_procs()
+            mtr_log = "mtr_%s.log" % self.tid
+            mtr_pid = self.src.run_mtr(self.dst, mtr_log)
+            time.sleep(test_duration/2)
+            self.src.wait_pid(mtr_pid)
+            self.src.get_file("/tmp/%s" % mtr_log)
+            xlsx = xlwt.Workbook()
+            csv2xlsx(xlsx, "%s_%s" % (self.src.address, mtr_log))
+            xlsx.save("%s.xlsx" % self.tid)
+            self.src.clear_logs(self.tid)
+            return
+
         self.src.clear_procs()
         self.dst.clear_procs()
 
-        iperf_server_log = "iperf_server_%s.log" % self.tid
-        self.dst.run_iperf_server(iperf_server_log)
-        self.dst_logs.append(iperf_server_log)
-        iperf_client_log = "iperf_client_%s.log" % self.tid
-        self.src.run_iperf_client(self.dst, iperf_client_log)
-        self.src_logs.append(iperf_client_log)
+        iperfserver_log = "iperfserver_%s.log" % self.tid
+        self.dst.run_iperf_server(iperfserver_log)
+        self.dst_logs.append(iperfserver_log)
+        iperfclient_log = "iperfclient_%s.log" % self.tid
+        self.src.run_iperf_client(self.dst, iperfclient_log)
+        self.src_logs.append(iperfclient_log)
 
         sar_log = "sar_%s.log" % self.tid
         self.dst.run_sar(sar_log)
@@ -207,23 +257,30 @@ class Diagnostics:
         self.src.wait_pid(mtr_pid)
 
         self.dst.kill_iperf()
-        self.dst.kill_sar()
-        self.src.kill_sar()
+        self.dst.kill_sar(sar_log)
+        self.src.kill_sar(sar_log)
 
+        xlsx = xlwt.Workbook()
         for log in self.src_logs:
             self.src.get_file("/tmp/%s" % log)
+            csv2xlsx(xlsx, "%s_%s" % (self.src.address, log))
         for log in self.dst_logs:
             self.dst.get_file("/tmp/%s" % log)
+            csv2xlsx(xlsx, "%s_%s" % (self.dst.address, log))
+        xlsx.save("%s.xlsx" % self.tid)
 
         self.src.clear_logs(self.tid)
         self.dst.clear_logs(self.tid)
 
 
 if __name__ == '__main__':
-    rwanda = DiagHost('rwanda', '10.0.63.202', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.202', iperf_port=5001)
-    ireland = DiagHost('ireland', '10.0.63.203', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.203', iperf_port=5001)
-    singapore = DiagHost('singapore', '10.0.63.204', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], test_address='10.0.63.203', iperf_port=5001)
+    rwanda = DiagHost('rwanda', '10.0.63.202', '10.0.63.202', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], iperf_port=5001)
+    ireland = Host('ireland', '10.0.63.203')
+    #ireland = DiagHost('ireland', '10.0.63.203', '10.0.63.203', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], iperf_port=5001)
+    singapore = DiagHost('singapore', '10.0.63.204', '10.0.63.204', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], iperf_port=5001)
 
     diag = Diagnostics(rwanda, ireland)
     diag.run()
 
+    diag = Diagnostics(singapore, rwanda)
+    diag.run()
