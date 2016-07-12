@@ -70,18 +70,18 @@ class ManagedHost(Host):
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, password=self.password)
             else:
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename='%s/.ssh/id_rsa' % os.environ['HOME'])
-            return ssh
+            self.ssh = ssh
         except e:
             logger.error(e)
-            return None
+
+    def disconnect(self):
+        self.ssh.close()
 
     def exec_command(self, cmd):
         try:
-            ssh = self.connect()
             logger.info('[%s@%s] %s' % (self.username, self.address, cmd))
-            stdin, stdout, stderr = ssh.exec_command(cmd)
+            stdin, stdout, stderr = self.ssh.exec_command(cmd)
             out = stdout.readlines()
-            ssh.close()
             return out
         except e:
             logger.error(e)
@@ -118,22 +118,21 @@ class ManagedHost(Host):
     def get_file(self, remotepath, localdir="."):
         filename = os.path.basename(remotepath)
         localpath = "%s/%s_%s" % (localdir, self.address, filename)
-        ssh = self.connect()
-        if ssh:
-            sftp = ssh.open_sftp()
+        try:
+            sftp = self.ssh.open_sftp()
             sftp.get(remotepath, localpath)
             sftp.close()
             logger.info("[%s@%s] get %s from %s" % (self.username, self.address, localpath, remotepath))
-        ssh.close()
+        except e:
+            logger.error(e)
 
     def put_file(self, localpath, remotepath):
-        ssh = self.connect()
-        if ssh:
-            sftp = ssh.open_sftp()
+        try:
+            sftp = self.ssh.open_sftp()
             sftp.put(localpath, remotepath)
-            sftp.close()
             logger.info("[%s@%s] put %s to %s" % (self.username, self.address, localpath, remotepath))
-        ssh.close()
+        except e:
+            logger.error(e)
 
     def wait_pid(self, pid):
         while 1:
@@ -168,24 +167,21 @@ class DiagHost(ManagedHost):
         cmd = "/usr/lib64/sa/sadc 1 14400"
         return self.exec_command_bg(cmd, log)
 
-    def run_traceroute(self, remote):
-        hops = []
-        cmd = "traceroute -q 1 -n -N 30 %s" % remote.address
-        ssh = self.connect()
-        if ssh:
-            stdin, stdout, stderr = ssh.exec_command("echo \"[%s@%s] %s\"" % (self.username, self.address, cmd))
-            print stdout.readlines()[0]
-            stdin, stdout, stderr = ssh.exec_command(cmd)
-            lines = stdout.readlines()
-            for line in lines:
-                if line.startswith('traceroute to'):
-                    continue
-                info = line.split()
-                if len(info) == 2:
-                    continue
-                hops.append(info[1])
-            ssh.close()
-        return hops
+    #def run_traceroute(self, remote):
+    #    hops = []
+    #    cmd = "traceroute -q 1 -n -N 30 %s" % remote.address
+    #    stdin, stdout, stderr = self.ssh.exec_command("echo \"[%s@%s] %s\"" % (self.username, self.address, cmd))
+    #    print stdout.readlines()[0]
+    #    stdin, stdout, stderr = self.ssh.exec_command(cmd)
+    #    lines = stdout.readlines()
+    #    for line in lines:
+    #        if line.startswith('traceroute to'):
+    #            continue
+    #        info = line.split()
+    #        if len(info) == 2:
+    #            continue
+    #        hops.append(info[1])
+    #    return hops
 
     def kill_iperf(self):
         cmd = "killall -2 iperf"
@@ -220,6 +216,8 @@ class Diagnostics:
         self.dst_logs = []
 
     def run(self):
+        self.src.connect()
+
         if str(self.dst.__class__) == '__main__.Host':
             self.src.clear_procs()
             mtr_log = "mtr_%s.log" % self.tid
@@ -232,6 +230,8 @@ class Diagnostics:
             xlsx.save("%s.xlsx" % self.tid)
             self.src.clear_logs(self.tid)
             return
+
+        self.dst.connect()
 
         self.src.clear_procs()
         self.dst.clear_procs()
@@ -271,6 +271,9 @@ class Diagnostics:
 
         self.src.clear_logs(self.tid)
         self.dst.clear_logs(self.tid)
+
+        self.src.disconnect()
+        self.dst.disconnect()
 
 
 if __name__ == '__main__':
