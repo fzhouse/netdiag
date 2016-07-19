@@ -1,10 +1,10 @@
 #!/usr/bin/python
 
+import multiprocessing
 import csv
 import xlwt
 import xlrd
 import time
-import shlex
 import os
 import platform
 import logging
@@ -14,7 +14,32 @@ import subprocess
 import paramiko
 import getpass
 
-test_duration = 10
+NUL_DEV = {
+    'Linux':    '/dev/null',
+    'Windows':  'NUL',
+}
+
+TMP_DIR = {
+    'Linux':    '/tmp',
+    'Windows':  '%TEMP%',
+}
+
+SELFDEL_CMD = {
+    'Linux':    'rm -- "$0"',
+    'Windows':  '(goto) 2>NUL % del "%~f0"',
+}
+
+RUN_SCRIPT = {
+    'Linux':    'run.sh',
+    'Windows':  'run.bat',
+}
+
+RUN_CMD = {
+    'Linux':    '/bin/bash',
+    'Windows':  'call',
+}
+
+test_duration = 5
 test_bandwidth = '1M'
 mtr_int = 0.2
 mtr_count = int(test_duration/2/mtr_int)
@@ -44,6 +69,15 @@ def csv2xlsx(xlsx, log):
     logger.info("save %s to %s" % (log, sheetname))
     os.system("rm -rf %s" % log)
 
+def run_aux(cmd, log, q):
+    f = open(log, 'w')
+    p = subprocess.Popen(cmd, stdout=f, universal_newlines=True, shell=True)
+    q.put(p.pid)
+    ret = p.wait()
+    f.flush()
+    f.close()
+
+
 class Node():
     def __init__(self, address, name=None):
         self.address = address
@@ -51,11 +85,10 @@ class Node():
             self.name = name
         self.name = address
 
+
 class Host(Node):
     def __init__(self, address, name=None, ssh_address=None, ssh_port=22, username='root', password=None, keyfile=None):
         Node.__init__(self, address, name)
-        if self.address == '127.0.0.1':
-            self.username = getpass.getuser()
         if ssh_address:
             self.ssh_address = ssh_address
         else:
@@ -64,8 +97,13 @@ class Host(Node):
         self.username = username
         self.password = password
         self.keyfile = keyfile
+        if self.address == '127.0.0.1':
+            self.username = getpass.getuser()
+            self.system = platform.system()
+        else:
+            self.system = 'Linux'
         self.connect()
-    
+
     def connect(self):
         if self.address == '127.0.0.1':
             logger.info("host %s is local" % self.name)
@@ -74,10 +112,10 @@ class Host(Node):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             if self.keyfile:
-                logger.info("login with key %s" % self.keyfile)
+                logger.info("login %s@%s with key %s" % (self.username, self.name, self.keyfile))
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename=self.keyfile)
             elif self.password:
-                logger.info("login with password %s" % self.password)
+                logger.info("login %s@%s with password %s" % (self.username, self.name, self.password))
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, password=self.password)
             else:
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename='%s/.ssh/id_rsa' % os.environ['HOME'])
@@ -94,86 +132,103 @@ class Host(Node):
         self.ssh.close()
 
     def exec_command(self, cmd):
-        if self.address == '127.0.0.1':
-            p = subprocess.Popen(shlex.split(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
-            stdout, stderr = p.communicate()
-            return stdout
+        logger.info('[%s@%s] %s' % (self.username, self.name, cmd))
         try:
-            logger.info('[%s@%s] %s' % (self.username, self.address, cmd))
-            stdin, stdout, stderr = self.ssh.exec_command(cmd)
-            out = stdout.readlines()
-            return out
+            if self.address == '127.0.0.1':
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+                stdout, stderr = p.communicate()
+                return stdout
+            else:
+                stdin, stdout, stderr = self.ssh.exec_command(cmd)
+                return stdout.readlines()
         except Exception, e:
-            logger.error("run %s error: %s", (cmd, e))
+            logger.error("run %s error: %s" % (cmd, e))
 
     def make_scripts(self, cmds):
-        logger.info(cmds)
-        cmds.append("rm -- \"$0\"")
+        logger.info("make %s: %s" % (RUN_SCRIPT[self.system], cmds))
+        cmds.append(SELFDEL_CMD[self.system])
         br = '\n'
         cmd = br.join(cmds)
-        fi = open("./run.sh", "w")
+        fi = open("./%s" % RUN_SCRIPT[self.system], "w")
         fi.write(cmd)
         fi.close()
-        self.put_file("./run.sh", "/tmp/run.sh")
-        os.system("rm -rf ./run.sh")
+        self.put_file("./" + RUN_SCRIPT[self.system], "%s/%s" % (TMP_DIR[self.system], RUN_SCRIPT[self.system]))
+        os.remove("./%s" % RUN_SCRIPT[self.system])
 
     def exec_commands(self, cmds):
         self.make_scripts(cmds)
-        return self.exec_command("/bin/bash /tmp/run.sh")
+        return self.exec_command("%s %s/%s" % (RUN_CMD[self.system], TMP_DIR[self.system], RUN_SCRIPT[self.system]))
 
     def exec_command_bg(self, cmd, log=None):
         if log:
-            log = '/tmp/%s' % log
+            log = '%s/%s' % (TMP_DIR[self.system], log)
         else:
-            log = '/dev/null'
-        cmds = ["nohup %s &> %s &" % (cmd, log), "echo $!"]
-        pid = int(self.exec_commands(cmds)[0], 10)
-        logger.info("%s pid: %s" % (cmd, pid))
+            log = NUL_DEV[self.system]
+        if self.system == 'Linux':
+            cmds = ["nohup %s &> %s &" % (cmd, log), "echo $!"]
+            pid = int(self.exec_commands(cmds)[0], 10)
+        else:
+            # On Windows, cmd can only be run locally
+            q = multiprocessing.Queue()
+            p = multiprocessing.Process(target=run_aux, args=(cmd, log, q))
+            p.start()
+            pid = q.get()
+        logger.info("[%s@%s] %s with pid: %s" % (self.username, self.name, cmd, pid))
         return pid
 
     def exec_commands_bg(self, cmds, log):
         self.make_scripts(cmds)
-        self.exec_command_bg("/bin/bash /tmp/run.sh", log)
+        self.exec_command_bg("%s %s/%s" % (RUN_CMD[self.system], TMP_DIR[self.system], RUN_SCRIPT[self.system]), log)
 
     def kill_pid(self, pid):
-        self.exec_command("kill -2 %d" % pid)
+        if self.system == 'Linux':
+            self.exec_command("kill -2 %d" % pid)
+        if self.system == 'Windows':
+            self.exec_command("taskkill /F /T /PID %i" % pid)
 
     def get_file(self, remotepath, localdir="."):
         filename = os.path.basename(remotepath)
         localpath = "%s/%s_%s" % (localdir, self.address, filename)
         if self.address == '127.0.0.1':
-            p = subprocess.Popen(shlex.split('cp %s %s' % (remotepath, localpath)), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+            p = subprocess.Popen('cp %s %s' % (remotepath, localpath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             p.wait()
-            logger.info("[%s@%s] put %s to %s" % (self.username, self.address, localpath, remotepath))
+            logger.info("from %s@%s:%s get %s" % (self.username, self.name, localpath, remotepath))
             return
         try:
             sftp = self.ssh.open_sftp()
             sftp.get(remotepath, localpath)
             sftp.close()
-            logger.info("[%s@%s] get %s from %s" % (self.username, self.address, localpath, remotepath))
+            logger.info("from %s@%s:%s get %s" % (self.username, self.name, localpath, remotepath))
         except e:
             logger.error("get file error: %s" % e)
 
     def put_file(self, localpath, remotepath):
         if self.address == '127.0.0.1':
-            p = subprocess.Popen(shlex.split('cp %s %s' % (localpath, remotepath)), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+            p = subprocess.Popen('cp %s %s' % (localpath, remotepath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             p.wait()
-            logger.info("[%s@%s] put %s to %s" % (self.username, self.address, localpath, remotepath))
+            logger.info("put %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
             return
         try:
             sftp = self.ssh.open_sftp()
             sftp.put(localpath, remotepath)
-            logger.info("[%s@%s] put %s to %s" % (self.username, self.address, localpath, remotepath))
+            logger.info("put %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
         except Exception, e:
             logger.error("put file error: %s" % e)
 
     def wait_pid(self, pid):
         while 1:
-            out = self.exec_command("ps -q %d" % pid)
-            if len(out) == 2:
-                time.sleep(10)
-            else:
-                return
+            if self.system == 'Linux':
+                out = self.exec_command("ps -q %i" % pid)
+                if len(out) == 2:
+                    time.sleep(10)
+                else:
+                    return
+            if self.system == 'Windows':
+                out = self.exec_command('tasklist /fi "PID eq %i"' % pid)
+                if len(out) == 5:
+                    time.sleep(10)
+                else:
+                    return
 
 
 class DiagHost(Host):
@@ -289,6 +344,7 @@ class Diagnostics:
         self.dst.clear_logs(self.tid)
 
     def run(self):
+        logger.info("================ %s --> %s ================" % (self.src.name, self.dst.name))
         if str(self.dst.__class__) == '__main__.Node':
             self.diag_simple()
             return
