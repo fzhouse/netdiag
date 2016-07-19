@@ -192,7 +192,7 @@ class Host(Node):
         if self.address == '127.0.0.1':
             p = subprocess.Popen('cp %s %s' % (remotepath, localpath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             p.wait()
-            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath. localpath))
+            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath, localpath))
             return
         try:
             sftp = self.ssh.open_sftp()
