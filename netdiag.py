@@ -192,15 +192,15 @@ class Host(Node):
         if self.address == '127.0.0.1':
             p = subprocess.Popen('cp %s %s' % (remotepath, localpath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             p.wait()
-            logger.info("from %s@%s:%s get %s" % (self.username, self.name, localpath, remotepath))
+            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath. localpath))
             return
         try:
             sftp = self.ssh.open_sftp()
             sftp.get(remotepath, localpath)
             sftp.close()
-            logger.info("from %s@%s:%s get %s" % (self.username, self.name, localpath, remotepath))
-        except e:
-            logger.error("get file error: %s" % e)
+            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath, localpath))
+        except Exception, e:
+            logger.error("from %s@%s:%s get %s error: %s" % (self.username, self.name, remotepath, localpath, e))
 
     def put_file(self, localpath, remotepath):
         if self.address == '127.0.0.1':
@@ -213,7 +213,7 @@ class Host(Node):
             sftp.put(localpath, remotepath)
             logger.info("put %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
         except Exception, e:
-            logger.error("put file error: %s" % e)
+            logger.error("put %s to %s@%s:%s error: %s" % (localpath, self.username, self.name, remotepath, e))
 
     def wait_pid(self, pid):
         while 1:
@@ -353,12 +353,16 @@ class Diagnostics:
 
 
 if __name__ == '__main__':
-    h1 = DiagHost('10.0.63.202', 'h1', '10.0.63.202', 22, 'root', keyfile='%s/.ssh/id_rsa' % os.environ['HOME'], iperf_port=5001)
-    h2 = Node('10.0.63.203', 'h2')
-    h3 = DiagHost('127.0.0.1', 'h3')
+    h1 = DiagHost('10.0.63.202', 'h1', '10.0.63.202', 22, 'root', password='startimes123!@#', iperf_port=5001)
+    h2 = DiagHost('10.0.63.204', 'h2', password='startimes123!@#', iperf_port=5001)
+    h3 = Node('10.0.63.203', 'h3')
+    h4 = DiagHost('127.0.0.1', 'h4')
 
     diag = Diagnostics(h1, h2)
     diag.run()
+    
+    diag = Diagnostics(h1, h3)
+    diag.run()
 
-    diag = Diagnostics(h3, h1)
+    diag = Diagnostics(h4, h1)
     diag.run()
