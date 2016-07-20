@@ -258,13 +258,16 @@ class Host(Node):
             logger.error("put %s to %s@%s:%s error: %s" % (localpath, self.username, self.name, remotepath, e))
 
 
-class WindowsHost(Host):
-    def __init__(self, iperf_port=5001):
-        Host.__init__(self, address='127.0.0.1', name='localhost')
+class DiagHost(Host):
+    def __init__(self, address, name=None, ssh_address=None, ssh_port=22, username='root', password='', keyfile=None, iperf_port=5001):
+        Host.__init__(self, address, name, ssh_address, ssh_port, username, password, keyfile)
         self.iperf_port = iperf_port
-        self.code = self.chcp()
+        if self.system == 'Windows':
+            self.code = self.chcp()
 
     def chcp(self):
+        if self.system != 'Windows':
+            return
         out = self.exec_command('chcp')
         info = out.split()
         code = info[len(info)-1] 
@@ -278,6 +281,8 @@ class WindowsHost(Host):
         return code
     
     def run_ping(self, remote, log):
+        if self.system != 'Windows':
+            return
         cmd = 'ping -n %d %s' % (ping_count, remote.address)
         fi = open(TMP_DIR[self.system]+log, 'wb') 
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
@@ -313,6 +318,8 @@ class WindowsHost(Host):
         fi.close() 
 
     def run_tracert(self, remote, log):
+        if self.system != 'Windows':
+            return
         cmd = 'tracert -d -h 64 %s' % remote.address 
         fi = open(TMP_DIR[self.system]+log, 'wb') 
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
@@ -351,19 +358,6 @@ class WindowsHost(Host):
                 fi.flush() 
         fi.close() 
 
-    def clear_procs(self):
-        cmds = ["taskkill /im ping.exe /f", "taskkill /im iperf.exe /f", "del %s*.log" % TMP_DIR[self.system]]
-        return self.exec_commands(cmds)
-
-    def clear_logs(self, tid):
-        self.exec_command("del %s*%s.log" % (TMP_DIR[self.system], tid))
-
-
-class DiagHost(Host):
-    def __init__(self, address, name=None, ssh_address=None, ssh_port=22, username='root', password='', keyfile=None, iperf_port=5001):
-        Host.__init__(self, address, name, ssh_address, ssh_port, username, password, keyfile)
-        self.iperf_port = iperf_port
-
     def run_iperf_server(self, log):
         cmd = "iperf -s -u -i 1 -p %d -y C" % self.iperf_port
         return self.exec_command_bg(cmd, log)
@@ -401,11 +395,17 @@ class DiagHost(Host):
         self.exec_command(cmd)
 
     def clear_procs(self):
-        cmds = ["killall -2 iperf", "killall -9 sadc", "killall -2 ping", "rm -rf /tmp/*.log"]
+        if self.system == 'Linux':
+            cmds = ["killall -2 iperf", "killall -9 sadc", "killall -2 ping", "rm -rf /tmp/*.log"]
+        if self.system == 'Windows':
+            cmds = ["taskkill /im ping.exe /f", "taskkill /im iperf.exe /f", "del %s*.log" % TMP_DIR[self.system]]
         self.exec_commands(cmds)
 
     def clear_logs(self, tid):
-        self.exec_command("rm -rf /tmp/*%s.log" % tid)
+        if self.system == 'Linux':
+            self.exec_command("rm -rf /tmp/*%s.log" % tid)
+        if self.system == 'Windows':
+        self.exec_command("del %s*%s.log" % (TMP_DIR[self.system], tid))
 
 
 class Diagnostics:
@@ -499,7 +499,7 @@ if __name__ == '__main__':
     h1 = DiagHost(address='10.0.63.202', username='root', password='startimes123!@#')
     h2 = DiagHost('10.0.63.204', username='root', password='startimes123!@#')
     h3 = Node('114.114.114.114')
-    h4 = WindowsHost('127.0.0.1')
+    h4 = DiagHost('127.0.0.1')
 
     diag = Diagnostics(h1, h2)
     diag.run()
