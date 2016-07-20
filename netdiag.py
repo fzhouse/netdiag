@@ -28,7 +28,7 @@ TMP_DIR = {
 
 SELFDEL_CMD = {
     'Linux':    'rm -- "$0"',
-    'Windows':  '(goto) 2>NUL % del "%~f0"',
+    'Windows':  '(goto) 2>NUL & del "%~f0"',
 }
 
 SCRIPT_EXT = {
@@ -50,6 +50,7 @@ test_duration = 5
 test_bandwidth = '1M'
 mtr_int = 0.2
 mtr_count = int(test_duration/2/mtr_int)
+ping_count = int(test_duration)
 
 logger = logging.getLogger('netdiag')
 logger.setLevel(logging.DEBUG)
@@ -74,10 +75,11 @@ def csv2xlsx(xlsx, log):
                 sheet.write(l, r, i)
                 r += 1
             l += 1
-        logger.info("save %s to %s" % (log, sheetname))
-        os.remove(log)
     except Exception, e:
         logger.error("save %s to xlsx error: %s" % (log, e))
+    csvfile.close()
+    logger.info("save %s to %s" % (log, sheetname))
+    os.remove(log)
 
 def run_aux(cmd, log, q):
     try:
@@ -235,7 +237,6 @@ class Host(Node):
         try:
             if self.address == '127.0.0.1':
                 shutil.copyfile(remotepath, localpath)
-                #os.rename(remotepath, localpath)
             else:
                 sftp = self.ssh.open_sftp()
                 sftp.get(remotepath, localpath)
@@ -248,7 +249,6 @@ class Host(Node):
         try:
             if self.address == '127.0.0.1':
                 shutil.copyfile(localpath, remotepath)
-                #os.rename(localpath, remotepath)
             else:
                 sftp = self.ssh.open_sftp()
                 sftp.put(localpath, remotepath)
@@ -266,9 +266,6 @@ class WindowsHost(Host):
 
     def chcp(self):
         out = self.exec_command('chcp')
-        #r = os.popen('chcp') 
-        #lines = r.readlines() 
-        #info = lines[0].split()
         info = out.split()
         code = info[len(info)-1] 
         if code == '437': 
@@ -281,8 +278,8 @@ class WindowsHost(Host):
         return code
     
     def run_ping(self, remote, log):
-        cmd = 'ping -t %s' % remote.address 
-        fi = open(log, 'w') 
+        cmd = 'ping -n %d %s' % (ping_count, remote.address)
+        fi = open(TMP_DIR[self.system]+log, 'wb') 
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
         seq = 1 
         while True: 
@@ -295,10 +292,9 @@ class WindowsHost(Host):
                     hit_str = 'Relay from' 
                     miss_str = 'Request timed out' 
                 elif self.code == '936': 
-                    hit_str = '来自' 
-                    miss_str = '请求超时'.encode('gbk') 
+                    hit_str = u'\u6765\u81ea' 
+                    miss_str = u'\u8bf7\u6c42\u8d85\u65f6'.encode('gbk') 
                 if out.startswith(hit_str): 
-                    print out 
                     data = '%d,' % seq 
                     outs = out.split() 
                     byts = outs[3].split('=', 1)[1] 
@@ -307,7 +303,6 @@ class WindowsHost(Host):
                     data += '%s,%s,%s' % (byts, delay, ttl) 
                     seq += 1 
                 elif out.startswith(miss_str): 
-                    print out 
                     data = '%d,' % seq 
                     data += '0,-1,0' 
                     seq += 1 
@@ -317,9 +312,9 @@ class WindowsHost(Host):
                 fi.flush() 
         fi.close() 
 
-    def run_tracert(self, remote, log): 
+    def run_tracert(self, remote, log):
         cmd = 'tracert -d -h 64 %s' % remote.address 
-        fi = open(log, 'w') 
+        fi = open(TMP_DIR[self.system]+log, 'wb') 
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
         while True: 
             out = p.stdout.readline() 
@@ -348,21 +343,20 @@ class WindowsHost(Host):
                 if self.code == '437': 
                     miss_str = 'Request timed out' 
                 elif self.code == '936': 
-                    miss_str = '请求超时'.encode('gbk') 
+                    miss_str = u'\u8bf7\u6c42\u8d85\u65f6'.encode('gbk') 
                 if addr.startswith(miss_str): 
                     addr = '0.0.0.0' 
-                data += ',' + addr 
-                print out 
+                data += ',' + addr
                 fi.write(data + '\n') 
                 fi.flush() 
         fi.close() 
 
     def clear_procs(self):
-        cmds = ["taskkill /im ping.exe /f", "taskkill /im iperf.exe /f", "for /f \%i in ('dir /a:%s /s /b *.log') do rd /s /q \%i" % TMP_DIR[self.system]]
+        cmds = ["taskkill /im ping.exe /f", "taskkill /im iperf.exe /f", "del %s*.log" % TMP_DIR[self.system]]
         return self.exec_commands(cmds)
 
     def clear_logs(self, tid):
-        self.exec_command("for /f \%i in ('dir /a:%s /s /b *%s.log') do rd /s /q \%i" % (TMP_DIR[self.system], tid))
+        self.exec_command("del %s*%s.log" % (TMP_DIR[self.system], tid))
 
 
 class DiagHost(Host):
@@ -502,7 +496,7 @@ if __name__ == '__main__':
     h1 = DiagHost(address='10.0.63.202', username='root', password='startimes123!@#')
     h2 = DiagHost('10.0.63.204', username='root', password='startimes123!@#')
     h3 = Node('114.114.114.114')
-    h4 = DiagHost('127.0.0.1')
+    h4 = WindowsHost('127.0.0.1')
 
     #diag = Diagnostics(h1, h2)
     #diag.run()
