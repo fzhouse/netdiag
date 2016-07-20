@@ -478,6 +478,9 @@ class Diagnostics:
         self.src.clear_logs(self.tid)
         self.dst.clear_logs(self.tid)
 
+    def diag_complex_windows(self):
+        self.diag_simple_windows()
+
     def run(self):
         logger.info("================ %s --> %s ================" % (self.src.name, self.dst.name))
         if str(self.dst.__class__) == '__main__.Node':
@@ -498,14 +501,14 @@ if __name__ == '__main__':
     h3 = Node('114.114.114.114')
     h4 = WindowsHost('127.0.0.1')
 
-    #diag = Diagnostics(h1, h2)
-    #diag.run()
+    diag = Diagnostics(h1, h2)
+    diag.run()
     
-    #diag = Diagnostics(h1, h3)
-    #diag.run()
+    diag = Diagnostics(h1, h3)
+    diag.run()
 
-    #diag = Diagnostics(h4, h1)
-    #diag.run()
+    diag = Diagnostics(h4, h1)
+    diag.run()
 
     diag = Diagnostics(h4, h3)
     diag.run()
