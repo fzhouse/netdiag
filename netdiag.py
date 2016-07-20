@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# -*- coding: UTF-8 -*- 
 
 import multiprocessing
 import csv
@@ -22,7 +23,7 @@ NUL_DEV = {
 
 TMP_DIR = {
     'Linux':    '/tmp/',
-    'Windows':  '%TEMP%\\',
+    'Windows':  os.environ['TEMP'] + '\\',
 }
 
 SELFDEL_CMD = {
@@ -40,6 +41,11 @@ RUN_CMD = {
     'Windows':  'call',
 }
 
+WRT_FLAG = {
+    'Linux':    'wb',
+    'Windows':  'w',
+}
+
 test_duration = 5
 test_bandwidth = '1M'
 mtr_int = 0.2
@@ -53,29 +59,32 @@ hdr.setFormatter(formatter)
 logger.addHandler(hdr)
 
 def csv2xlsx(xlsx, log):
-    data = os.path.basename(log).split('_')
-    sheetname = "%s_%s" % (data[0], data[1])
-    sheet = xlsx.add_sheet(sheetname)
-    csvfile = open(log, "rb")
-    reader = csv.reader(csvfile)
-    l = 0
-    for line in reader:
-        if line[0].startswith('#'):
-            continue
-        r = 0
-        for i in line:
-            sheet.write(l, r, i)
-            r += 1
-        l += 1
-    logger.info("save %s to %s" % (log, sheetname))
-    os.remove(log)
+    try:
+        data = os.path.basename(log).split('_')
+        sheetname = "%s_%s" % (data[0], data[1])
+        sheet = xlsx.add_sheet(sheetname)
+        csvfile = open(log, "rb")
+        reader = csv.reader(csvfile)
+        l = 0
+        for line in reader:
+            if line[0].startswith('#'):
+                continue
+            r = 0
+            for i in line:
+                sheet.write(l, r, i)
+                r += 1
+            l += 1
+        logger.info("save %s to %s" % (log, sheetname))
+        os.remove(log)
+    except Exception, e:
+        logger.error("save %s to xlsx error: %s" % (log, e))
 
 def run_aux(cmd, log, q):
     try:
         if log:
-            f = open(log, 'w')
+            f = open(log, 'wb')
         else:
-            f = open(os.devnull, 'w')
+            f = open(os.devnull, 'wb')
         p = subprocess.Popen(cmd, stdout=f, universal_newlines=True, shell=True)
         q.put(p.pid)
         ret = p.wait()
@@ -165,7 +174,7 @@ class Host(Node):
             logger.info("make %s from %s" % (run_script, cmds))
             br = '\n'
             cmd = br.join(cmds)
-            fi = open(run_script, "w")
+            fi = open(run_script, WRT_FLAG[self.system])
             fi.write(cmd)
             fi.close()
             script_remote = TMP_DIR[self.system] + run_script
@@ -249,6 +258,113 @@ class Host(Node):
             logger.error("put %s to %s@%s:%s error: %s" % (localpath, self.username, self.name, remotepath, e))
 
 
+class WindowsHost(Host):
+    def __init__(self, iperf_port=5001):
+        Host.__init__(self, address='127.0.0.1', name='localhost')
+        self.iperf_port = iperf_port
+        self.code = self.chcp()
+
+    def chcp(self):
+        out = self.exec_command('chcp')
+        #r = os.popen('chcp') 
+        #lines = r.readlines() 
+        #info = lines[0].split()
+        info = out.split()
+        code = info[len(info)-1] 
+        if code == '437': 
+            lang = 'English' 
+        elif code == '936': 
+            lang = 'Chinese' 
+        else: 
+            lang = 'Others' 
+        logger.info('Your system language is ' + lang) 
+        return code
+    
+    def run_ping(self, remote, log):
+        cmd = 'ping -t %s' % remote.address 
+        fi = open(log, 'w') 
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
+        seq = 1 
+        while True: 
+            out = p.stdout.readline() 
+            if out == '': 
+                if p.poll is not None: 
+                    break 
+            else: 
+                if self.code == '437': 
+                    hit_str = 'Relay from' 
+                    miss_str = 'Request timed out' 
+                elif self.code == '936': 
+                    hit_str = '来自' 
+                    miss_str = '请求超时'.encode('gbk') 
+                if out.startswith(hit_str): 
+                    print out 
+                    data = '%d,' % seq 
+                    outs = out.split() 
+                    byts = outs[3].split('=', 1)[1] 
+                    delay = outs[4].split('=', 1)[1].split('ms', 1)[0] 
+                    ttl = outs[5].split('=', 1)[1] 
+                    data += '%s,%s,%s' % (byts, delay, ttl) 
+                    seq += 1 
+                elif out.startswith(miss_str): 
+                    print out 
+                    data = '%d,' % seq 
+                    data += '0,-1,0' 
+                    seq += 1 
+                else: 
+                    continue 
+                fi.write(data + '\n') 
+                fi.flush() 
+        fi.close() 
+
+    def run_tracert(self, remote, log): 
+        cmd = 'tracert -d -h 64 %s' % remote.address 
+        fi = open(log, 'w') 
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, shell=True) 
+        while True: 
+            out = p.stdout.readline() 
+            if out == '': 
+                if p.poll is not None: 
+                    break 
+            else: 
+                outs = out.split() 
+                if len(outs) == 0: 
+                    continue 
+                if not outs[0].isdigit(): 
+                    continue 
+                data = outs[0] 
+                start = 1 
+                for i in range(3): 
+                    if outs[start] == '*': 
+                        data += ',-1' 
+                        start += 1 
+                    else: 
+                        if outs[start] == '<1': 
+                            data += ',0' 
+                        else: 
+                            data += ',' + outs[start] 
+                        start += 2 
+                addr = outs[start] 
+                if self.code == '437': 
+                    miss_str = 'Request timed out' 
+                elif self.code == '936': 
+                    miss_str = '请求超时'.encode('gbk') 
+                if addr.startswith(miss_str): 
+                    addr = '0.0.0.0' 
+                data += ',' + addr 
+                print out 
+                fi.write(data + '\n') 
+                fi.flush() 
+        fi.close() 
+
+    def clear_procs(self):
+        cmds = ["taskkill /im ping.exe /f", "taskkill /im iperf.exe /f", "for /f \%i in ('dir /a:%s /s /b *.log') do rd /s /q \%i" % TMP_DIR[self.system]]
+        return self.exec_commands(cmds)
+
+    def clear_logs(self, tid):
+        self.exec_command("for /f \%i in ('dir /a:%s /s /b *%s.log') do rd /s /q \%i" % (TMP_DIR[self.system], tid))
+
+
 class DiagHost(Host):
     def __init__(self, address, name=None, ssh_address=None, ssh_port=22, username='root', password='', keyfile=None, iperf_port=5001):
         Host.__init__(self, address, name, ssh_address, ssh_port, username, password, keyfile)
@@ -279,7 +395,7 @@ class DiagHost(Host):
         self.exec_command(cmd)
 
     def kill_sar(self, log):
-        cmds = ["killall -2 sadc", "mv /tmp/%s /tmp/tmplog" % log, "sadf -d /tmp/tmplog -- -r -n DEV | grep -v '^#' | sed 's/;/,/g' > /tmp/%s" % log, "rm -rf /tmp/tmplog"]
+        cmds = ["killall -9 sadc", "mv /tmp/%s /tmp/tmplog" % log, "sadf -d /tmp/tmplog -- -r -n DEV | grep -v '^#' | sed 's/;/,/g' > /tmp/%s" % log, "rm -rf /tmp/tmplog"]
         self.exec_commands(cmds)
 
     def kill_ping(self):
@@ -291,7 +407,7 @@ class DiagHost(Host):
         self.exec_command(cmd)
 
     def clear_procs(self):
-        cmds = ["killall -2 iperf", "killall -2 sadc", "killall -2 ping", "rm -rf /tmp/*.log"]
+        cmds = ["killall -2 iperf", "killall -9 sadc", "killall -2 ping", "rm -rf /tmp/*.log"]
         self.exec_commands(cmds)
 
     def clear_logs(self, tid):
@@ -306,9 +422,6 @@ class Diagnostics:
         self.src_logs = []
         self.dst_logs = []
 
-    def diag_local_windows(self):
-        pass
-
     def diag_simple(self):
         self.src.clear_procs()
         mtr_log = "mtr_%s.log" % self.tid
@@ -318,6 +431,16 @@ class Diagnostics:
         self.src.get_file("/tmp/%s" % mtr_log)
         xlsx = xlwt.Workbook()
         csv2xlsx(xlsx, "%s_%s" % (self.src.address, mtr_log))
+        xlsx.save("%s.xlsx" % self.tid)
+        self.src.clear_logs(self.tid)
+
+    def diag_simple_windows(self):
+        self.src.clear_procs()
+        tr_log = "tracert_%s.log" % self.tid
+        self.src.run_tracert(self.dst, tr_log)
+        self.src.get_file(TMP_DIR[self.src.system] + tr_log)
+        xlsx = xlwt.Workbook()
+        csv2xlsx(xlsx, "%s_%s" % (self.src.address, tr_log))
         xlsx.save("%s.xlsx" % self.tid)
         self.src.clear_logs(self.tid)
 
@@ -351,10 +474,10 @@ class Diagnostics:
 
         xlsx = xlwt.Workbook()
         for log in self.src_logs:
-            self.src.get_file("/tmp/%s" % log)
+            self.src.get_file(TMP_DIR[self.src.system] + log)
             csv2xlsx(xlsx, "%s_%s" % (self.src.address, log))
         for log in self.dst_logs:
-            self.dst.get_file("/tmp/%s" % log)
+            self.dst.get_file(TMP_DIR[self.dst.system] + log)
             csv2xlsx(xlsx, "%s_%s" % (self.dst.address, log))
         xlsx.save("%s.xlsx" % self.tid)
 
@@ -364,10 +487,15 @@ class Diagnostics:
     def run(self):
         logger.info("================ %s --> %s ================" % (self.src.name, self.dst.name))
         if str(self.dst.__class__) == '__main__.Node':
-            self.diag_simple()
+            if self.src.system == 'Windows':
+                self.diag_simple_windows()
+            if self.src.system == 'Linux':
+                self.diag_simple()
             return
-        self.diag_complex()
-
+        if self.src.system == 'Windows':
+            self.diag_complex_windows()
+        if self.src.system == 'Linux':
+            self.diag_complex()
 
 
 if __name__ == '__main__':
@@ -376,11 +504,14 @@ if __name__ == '__main__':
     h3 = Node('114.114.114.114')
     h4 = DiagHost('127.0.0.1')
 
-    diag = Diagnostics(h1, h2)
-    diag.run()
+    #diag = Diagnostics(h1, h2)
+    #diag.run()
     
-    diag = Diagnostics(h1, h3)
-    diag.run()
+    #diag = Diagnostics(h1, h3)
+    #diag.run()
 
-    diag = Diagnostics(h4, h1)
+    #diag = Diagnostics(h4, h1)
+    #diag.run()
+
+    diag = Diagnostics(h4, h3)
     diag.run()
