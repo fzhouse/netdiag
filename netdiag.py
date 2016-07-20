@@ -13,6 +13,7 @@ import json
 import subprocess
 import paramiko
 import getpass
+import shutil
 
 NUL_DEV = {
     'Linux':    '/dev/null',
@@ -20,8 +21,8 @@ NUL_DEV = {
 }
 
 TMP_DIR = {
-    'Linux':    '/tmp',
-    'Windows':  '%TEMP%',
+    'Linux':    '/tmp/',
+    'Windows':  '%TEMP%\\',
 }
 
 SELFDEL_CMD = {
@@ -29,9 +30,9 @@ SELFDEL_CMD = {
     'Windows':  '(goto) 2>NUL % del "%~f0"',
 }
 
-RUN_SCRIPT = {
-    'Linux':    'run.sh',
-    'Windows':  'run.bat',
+SCRIPT_EXT = {
+    'Linux':    '.sh',
+    'Windows':  '.bat',
 }
 
 RUN_CMD = {
@@ -67,15 +68,21 @@ def csv2xlsx(xlsx, log):
             r += 1
         l += 1
     logger.info("save %s to %s" % (log, sheetname))
-    os.system("rm -rf %s" % log)
+    os.remove(log)
 
 def run_aux(cmd, log, q):
-    f = open(log, 'w')
-    p = subprocess.Popen(cmd, stdout=f, universal_newlines=True, shell=True)
-    q.put(p.pid)
-    ret = p.wait()
-    f.flush()
-    f.close()
+    try:
+        if log:
+            f = open(log, 'w')
+        else:
+            f = open(os.devnull, 'w')
+        p = subprocess.Popen(cmd, stdout=f, universal_newlines=True, shell=True)
+        q.put(p.pid)
+        ret = p.wait()
+        f.flush()
+        f.close()
+    except Exception, e:
+        logger.error('run %s error: %s' % (cmd, e))
 
 
 class Node():
@@ -83,7 +90,11 @@ class Node():
         self.address = address
         if name:
             self.name = name
-        self.name = address
+        else:
+            if self.address == '127.0.0.1':
+                self.name = 'localhost'
+            else:
+                self.name = address
 
 
 class Host(Node):
@@ -94,11 +105,13 @@ class Host(Node):
         else:
             self.ssh_address = address
         self.ssh_port = ssh_port
-        self.username = username
+        if self.address == '127.0.0.1':
+            self.username = getpass.getuser()
+        else:
+            self.username = username
         self.password = password
         self.keyfile = keyfile
         if self.address == '127.0.0.1':
-            self.username = getpass.getuser()
             self.system = platform.system()
         else:
             self.system = 'Linux'
@@ -118,7 +131,7 @@ class Host(Node):
                 logger.info("login %s@%s with password %s" % (self.username, self.name, self.password))
                 ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, password=self.password)
             else:
-                ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename='%s/.ssh/id_rsa' % os.environ['HOME'])
+                ssh.connect(self.ssh_address, port=self.ssh_port, username=self.username, key_filename='%s/.ssh/id_rsa' % os.path.expanduser('~'))
             self.ssh = ssh
         except Exception, e:
             logger.error("connect %s error: %s" % (self.name, e))
@@ -145,75 +158,53 @@ class Host(Node):
             logger.error("run %s error: %s" % (cmd, e))
 
     def make_scripts(self, cmds):
-        logger.info("make %s: %s" % (RUN_SCRIPT[self.system], cmds))
-        cmds.append(SELFDEL_CMD[self.system])
-        br = '\n'
-        cmd = br.join(cmds)
-        fi = open("./%s" % RUN_SCRIPT[self.system], "w")
-        fi.write(cmd)
-        fi.close()
-        self.put_file("./" + RUN_SCRIPT[self.system], "%s/%s" % (TMP_DIR[self.system], RUN_SCRIPT[self.system]))
-        os.remove("./%s" % RUN_SCRIPT[self.system])
+        try:
+            sid = shortuuid.uuid()
+            cmds.append(SELFDEL_CMD[self.system])
+            run_script = 'run_' + sid + SCRIPT_EXT[self.system]
+            logger.info("make %s from %s" % (run_script, cmds))
+            br = '\n'
+            cmd = br.join(cmds)
+            fi = open(run_script, "w")
+            fi.write(cmd)
+            fi.close()
+            script_remote = TMP_DIR[self.system] + run_script
+            self.put_file(run_script, script_remote)
+            os.remove(run_script)
+            return script_remote
+        except Exception, e:
+            logger.error("make script %s error: %s" % (run_script, e))
 
     def exec_commands(self, cmds):
-        self.make_scripts(cmds)
-        return self.exec_command("%s %s/%s" % (RUN_CMD[self.system], TMP_DIR[self.system], RUN_SCRIPT[self.system]))
+        run_script = self.make_scripts(cmds)
+        return self.exec_command(RUN_CMD[self.system] + ' ' + run_script)
 
     def exec_command_bg(self, cmd, log=None):
-        if log:
-            log = '%s/%s' % (TMP_DIR[self.system], log)
-        else:
-            log = NUL_DEV[self.system]
-        if self.system == 'Linux':
-            cmds = ["nohup %s &> %s &" % (cmd, log), "echo $!"]
-            pid = int(self.exec_commands(cmds)[0], 10)
-        else:
-            # On Windows, cmd can only be run locally
-            q = multiprocessing.Queue()
-            p = multiprocessing.Process(target=run_aux, args=(cmd, log, q))
-            p.start()
-            pid = q.get()
-        logger.info("[%s@%s] %s with pid: %s" % (self.username, self.name, cmd, pid))
-        return pid
+        try:
+            if self.system == 'Linux':
+                if not log:
+                    log = '/dev/null'
+                cmds = ["nohup %s &> /tmp/%s &" % (cmd, log), "echo $!"]
+                pid = int(self.exec_commands(cmds)[0], 10)
+            else:
+                q = multiprocessing.Queue()
+                p = multiprocessing.Process(target=run_aux, args=(cmd, TMP_DIR[self.system] + log, q))
+                p.start()
+                pid = q.get()
+            logger.info("[%s@%s] %s with pid: %s" % (self.username, self.name, cmd, pid))
+            return pid
+        except Exception, e:
+            logger.error('run background %s error: %s' % (cmds, e))
 
     def exec_commands_bg(self, cmds, log):
-        self.make_scripts(cmds)
-        self.exec_command_bg("%s %s/%s" % (RUN_CMD[self.system], TMP_DIR[self.system], RUN_SCRIPT[self.system]), log)
+        run_script = self.make_scripts(cmds)
+        return self.exec_command_bg(RUN_CMD[self.system] + ' ' + TMP_DIR[self.system] + run_script, log)
 
     def kill_pid(self, pid):
         if self.system == 'Linux':
             self.exec_command("kill -2 %d" % pid)
         if self.system == 'Windows':
             self.exec_command("taskkill /F /T /PID %i" % pid)
-
-    def get_file(self, remotepath, localdir="."):
-        filename = os.path.basename(remotepath)
-        localpath = "%s/%s_%s" % (localdir, self.address, filename)
-        if self.address == '127.0.0.1':
-            p = subprocess.Popen('cp %s %s' % (remotepath, localpath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-            p.wait()
-            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath, localpath))
-            return
-        try:
-            sftp = self.ssh.open_sftp()
-            sftp.get(remotepath, localpath)
-            sftp.close()
-            logger.info("from %s@%s:%s get %s" % (self.username, self.name, remotepath, localpath))
-        except Exception, e:
-            logger.error("from %s@%s:%s get %s error: %s" % (self.username, self.name, remotepath, localpath, e))
-
-    def put_file(self, localpath, remotepath):
-        if self.address == '127.0.0.1':
-            p = subprocess.Popen('cp %s %s' % (localpath, remotepath), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-            p.wait()
-            logger.info("put %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
-            return
-        try:
-            sftp = self.ssh.open_sftp()
-            sftp.put(localpath, remotepath)
-            logger.info("put %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
-        except Exception, e:
-            logger.error("put %s to %s@%s:%s error: %s" % (localpath, self.username, self.name, remotepath, e))
 
     def wait_pid(self, pid):
         while 1:
@@ -229,6 +220,33 @@ class Host(Node):
                     time.sleep(10)
                 else:
                     return
+
+    def get_file(self, remotepath, localdir=''):
+        localpath = localdir + "%s_%s" % (self.address, os.path.basename(remotepath))
+        try:
+            if self.address == '127.0.0.1':
+                shutil.copyfile(remotepath, localpath)
+                #os.rename(remotepath, localpath)
+            else:
+                sftp = self.ssh.open_sftp()
+                sftp.get(remotepath, localpath)
+                sftp.close()
+            logger.info("from %s@%s:%s to %s" % (self.username, self.name, remotepath, localpath))
+        except Exception, e:
+            logger.error("from %s@%s:%s get %s error: %s" % (self.username, self.name, remotepath, localpath, e))
+
+    def put_file(self, localpath, remotepath):
+        try:
+            if self.address == '127.0.0.1':
+                shutil.copyfile(localpath, remotepath)
+                #os.rename(localpath, remotepath)
+            else:
+                sftp = self.ssh.open_sftp()
+                sftp.put(localpath, remotepath)
+                sftp.close()
+            logger.info("from %s to %s@%s:%s" % (localpath, self.username, self.name, remotepath))
+        except Exception, e:
+            logger.error("put %s to %s@%s:%s error: %s" % (localpath, self.username, self.name, remotepath, e))
 
 
 class DiagHost(Host):
@@ -353,10 +371,10 @@ class Diagnostics:
 
 
 if __name__ == '__main__':
-    h1 = DiagHost('10.0.63.202', 'h1', '10.0.63.202', 22, 'root', password='startimes123!@#', iperf_port=5001)
-    h2 = DiagHost('10.0.63.204', 'h2', password='startimes123!@#', iperf_port=5001)
-    h3 = Node('10.0.63.203', 'h3')
-    h4 = DiagHost('127.0.0.1', 'h4')
+    h1 = DiagHost(address='10.0.63.202', username='root', password='startimes123!@#')
+    h2 = DiagHost('10.0.63.204', username='root', password='startimes123!@#')
+    h3 = Node('114.114.114.114')
+    h4 = DiagHost('127.0.0.1')
 
     diag = Diagnostics(h1, h2)
     diag.run()
