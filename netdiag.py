@@ -436,7 +436,7 @@ class DiagHost(Host):
             logger.error("get ip info error: %s" % e)
         try:
             fi = open(logpath, 'wb')
-            basestr = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s" % (self.name, self.address, self.system, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())), ipinfo['ip'], ipinfo['country'], ipinfo['region'], ipinfo['city'], ipinfo['org'], ipinfo['loc'])
+            basestr = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s" % (self.name, self.address, self.system, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())), ipinfo['ip'], ipinfo['country'], ipinfo['region'], ipinfo['city'], ipinfo['org'].replace(',',' '), ipinfo['loc'])
             fi.write(basestr)
             logger.info("write base info: %s to %s" % (basestr, log))
         except Exception, e:
